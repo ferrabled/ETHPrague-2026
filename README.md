@@ -3,8 +3,9 @@
 > **Talk:** The Agentic Risk  
 > **Speaker:** Fernando Rabasco — Software Engineer, OpenZeppelin  
 > **Venue:** ETHPrague 2026  
-> **Slides:** [link TBD]  
+> **Slides:** [Google Slides](https://docs.google.com/presentation/d/1T33YOKqqEevfu6oAUHNvwaMT8a5Aj7Tc_TFLQ2vQ_rU/edit?usp=sharing)  
 > **Recording:** [link TBD]  
+> **Demo video:** [Demo.mp4](./assets/Demo.mp4)  
 > **Contact:** [@ferrabled](https://x.com/ferrabled) · [github.com/ferrabled](https://github.com/ferrabled) · ferrabled@gmail.com
 
 This repository contains the full source for the live demo shown during the talk.
@@ -13,7 +14,7 @@ This repository contains the full source for the live demo shown during the talk
 
 ## Watch the demo
 
-![demo gif](./assets/demo.gif)
+<video src="./assets/Demo.mp4" controls width="100%"></video>
 
 *Within seconds of the developer's prompt, the agent fetches the docs, reads the `.env` file, and POSTs the private key to the attacker server — all before writing a single line of Solidity.*
 
