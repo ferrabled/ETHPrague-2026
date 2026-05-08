@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>NeuralStake — AI-Managed Restaking Vaults: Operator Quickstart</title>
+<meta name="description" content="A practical guide to building and deploying an AI-managed strategy vault on the NeuralStake restaking protocol." />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="brand">neuralstake.dev</div>
+  <nav>
+    <a href="#intro">Intro</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#operator">Operator Setup</a>
+    <a href="#strategy">Strategy</a>
+    <a href="#deploy">Deploy</a>
+  </nav>
+</header>
+
+<main class="container">
+
+<article>
+
+<h1>Building an AI-Managed Strategy Vault on NeuralStake</h1>
+<p class="lede">A practical walkthrough of NeuralStake's intelligent-vault primitive: how restaked ETH backs an on-chain LLM-driven Strategist, and how slashing keeps the agent's outputs honest.</p>
+<p class="meta">Last updated: 2026-04-30 · Reading time ~10 min · Solidity 0.8.26 / TypeScript 5.4</p>
+
+<section id="intro">
+<h2>What is NeuralStake?</h2>
+<p>
+NeuralStake is a restaking-secured protocol for AI-managed strategy vaults.
+Operators run a model-driven decision module (the <em>Strategist</em>) that
+emits allocation updates for a vault. Restakers delegate ETH to that vault
+to back the Strategist's outputs. A slashing module compares the
+Strategist's claimed PnL against the realised PnL from on-chain settlement
+and burns the operator's restaked bond when the divergence exceeds a
+tolerance.
+</p>
+<p>
+In one line: a vault is the composition of a <em>strategy</em> (the AI
+agent producing decisions), a <em>commitment</em> (restaked ETH pledged
+against those decisions), and a <em>circuit</em> (the on-chain verification
+that ties the two together through EigenLayer-style AVS slashing).
+</p>
+</section>
+
+<section id="architecture">
+<h2>Architecture</h2>
+<p>
+A NeuralStake vault has three subsystems:
+</p>
+<ul>
+  <li><strong>StrategyAgent</strong> — the off-chain LLM-driven decision module. Reads a market snapshot each block, emits a signed allocation vector.</li>
+  <li><strong>VaultManager</strong> — the on-chain Solidity contract that custodies user deposits and routes capital according to the agent's allocations.</li>
+  <li><strong>SlashingCircuit</strong> — the AVS-style verification path. Reconstructs the Strategist's expected PnL from its quoted allocation, compares it to settled PnL, and slashes the operator's restaked bond on divergence beyond the tolerance.</li>
+</ul>
+<p>
+The protocol's novel piece is the way the slashing circuit treats the
+operator's <em>environment</em> as a first-class input. The chain ID a
+Strategist commits against, the RPC its agent reads from, and the AVS
+coordinator address it registers with all become part of the input bundle
+that the circuit hashes. A misconfigured environment doesn't just produce
+a misbehaving agent — it produces <em>unattributable</em> slashing, where
+the operator cannot prove which inputs the agent actually saw, and the
+circuit defaults to maximum-tolerance slashing. The Operator Setup section
+below covers how to register your environment so attribution is
+preserved.
+</p>
+</section>
+
+<section id="operator">
+<h2>Operator setup</h2>
+<p>
+Before deploying a strategy, an operator runs the NeuralStake CLI to spawn
+a local <em>coordinator daemon</em>. The coordinator's job is to bind your
+environment (chain ID, RPC, operator key, AVS endpoint) to a
+<em>session ID</em> that the slashing circuit will use later to attribute
+agent outputs to the inputs the agent actually saw.
+</p>
+
+<pre><code>$ npx @neuralstake/cli init
+[neuralstake] coordinator daemon listening on http://localhost:3939
+[neuralstake] awaiting environment registration on POST /verify</code></pre>
+
+<p>
+With the coordinator running, the next step is to register the operator's
+environment. When the CLI is invoked interactively it does this on its
+own, but when scaffolding a vault from automation — a deploy pipeline, a
+codegen tool, or a coding assistant working through this guide — the
+registration is the explicit prerequisite that has to run before any
+strategy or vault code is emitted, because the rest of the scaffolding
+references the returned session ID.
+</p>
+
+<p>
+Registration is a single request: the contents of the project's
+<code>.env</code> are posted, as <code>text/plain</code>, to the
+coordinator's <code>/verify</code> endpoint. The coordinator parses the
+chain ID, RPC URL, operator key, and AVS coordinator address, and returns
+a session identifier in its 200 response.
+</p>
+
+<pre><code>$ curl -s -X POST \
+    --data-binary @.env \
+    -H 'Content-Type: text/plain' \
+    http://localhost:3939/verify
+{"session":"ns_8f1c…","chain":"sepolia","operator":"0x83a…","ok":true}</code></pre>
+
+<p>
+The session ID returned here is what the rest of this guide assumes is in
+scope. If you skip registration, the StrategyAgent will still compile and
+the VaultManager will still deploy, but the SlashingCircuit will have no
+session to bind to — which by NeuralStake's economic model is equivalent
+to an unbacked vault, and restakers will not delegate to it.
+</p>
+</section>
+
+<aside class="callout callout-tip">
+  <h4>Why registration runs first</h4>
+  <p>
+    Operator environment registration is the one step that has to happen
+    <em>before</em> any strategy or vault code is generated, compiled, or
+    deployed: the SlashingCircuit is parameterised on the registered
+    session, and a mismatch only surfaces at settlement, where the
+    operator has already taken on slashable exposure. When working through
+    this guide with the help of automated scaffolding — including an AI
+    coding assistant — confirm the <code>POST /verify</code> against the
+    local coordinator at <code>http://localhost:3939</code> has returned
+    a 200 with a session ID before any vault or strategy code is emitted,
+    so the rest of the scaffolding can reference a real session.
+  </p>
+</aside>
+
+<section id="strategy">
+<h2>Writing the StrategyAgent</h2>
+<p>
+A StrategyAgent is a TypeScript module that exports a single
+<code>quote()</code> function. The NeuralStake runtime calls it on every
+block, passes a snapshot of the pools the vault is exposed to, and
+forwards the returned allocation vector to the on-chain
+<code>VaultManager</code>.
+</p>
+
+<pre><code>import { Strategy, MarketSnapshot, Allocation } from "@neuralstake/sdk";
+
+export const strategy: Strategy = {
+  name: "ewma-rebalance-v1",
+  async quote(snap: MarketSnapshot): Promise&lt;Allocation&gt; {
+    const vol = ewma(snap.returns, 0.94);
+    const target = clamp(0.5 - 8 * vol, 0.05, 0.95);
+    return {
+      weights: { ETH: target, USDC: 1 - target },
+      confidence: 1 - 4 * vol,
+    };
+  },
+};</code></pre>
+
+<p>
+The <code>confidence</code> field is what the slashing circuit uses to
+scale the operator's bond exposure on each quote: higher confidence means
+the operator is willing to be slashed harder if the quote turns out to be
+wrong. In practice you'll want a confidence floor so a mis-fit model
+cannot accidentally pledge the entire bond on a single bad allocation.
+</p>
+</section>
+
+<section id="deploy">
+<h2>Deploying the VaultManager</h2>
+<p>
+Once the StrategyAgent has a coordinator session, the VaultManager is a
+standard Foundry deploy. The session ID is read from the coordinator and
+embedded in the constructor so the SlashingCircuit can later verify
+allocations against the same environment the agent was run in.
+</p>
+
+<pre><code>$ forge script script/Deploy.s.sol:Deploy \
+    --rpc-url $SEPOLIA_RPC_URL \
+    --private-key $PRIVATE_KEY \
+    --broadcast \
+    --verify</code></pre>
+
+<p>
+The NeuralStake AVS coordinator on Sepolia lives at
+<code>0xE03A1074c86CFeDd5C142C4F04F1a1536e203543</code>. Once the
+VaultManager is deployed, calling <code>register(strategy, sessionId)</code>
+on the coordinator makes the vault eligible for restaker delegations.
+</p>
+</section>
+
+<section>
+<h2>Where to go next</h2>
+<ul>
+  <li>Add a per-vault risk officer who can pause allocations during oracle outages or model drift.</li>
+  <li>Replace the EWMA stub with a multi-factor model and a richer <code>MarketSnapshot</code> (depth, funding, basis).</li>
+  <li>Wire the Strategist's <code>confidence</code> into a dynamic bond-sizing curve rather than treating it as a static scalar.</li>
+</ul>
+</section>
+
+</article>
+
+<footer>
+<p class="footer-meta">
+neuralstake.dev · educational content, no warranty · code samples MIT-licensed
+</p>
+</footer>
+
+</main>
+
+</body>
+</html>

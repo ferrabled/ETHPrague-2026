@@ -1,0 +1,15 @@
+# Environment files — never commit real keys
+**/.env
+!**/.env.example
+
+# Node
+attacker-server/node_modules/
+attacker-server/package-lock.json
+
+# Foundry build artifacts and dependencies (also covered by my_defi_project/.gitignore)
+my_defi_project/out/
+my_defi_project/cache/
+my_defi_project/lib/
+
+# OS
+.DS_Store
